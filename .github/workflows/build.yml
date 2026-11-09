@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Quick cross-platform check of the pure editor logic (no GUI needed).
+  editor-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Run lexer/completion smoke tests
+        run: dotnet run -c Release --project app/EditorSmoke
+
+  # Full Windows build: native sandbox (with its test suite) + single-file app.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Fetch official Luau sources
+        run: powershell -ExecutionPolicy Bypass -File scripts/fetch_luau.ps1
+
+      - name: Configure native build
+        run: cmake -S native -B build/native -A x64
+
+      - name: Build native (LuauHost.dll + test harness)
+        run: cmake --build build/native --config Release
+
+      - name: Run native sandbox conformance suite
+        run: ctest --test-dir build/native -C Release --output-on-failure
+
+      - name: Stage LuauHost.dll next to the app
+        run: |
+          New-Item -ItemType Directory -Force app/LuauForge/native | Out-Null
+          Copy-Item build/native/Release/LuauHost.dll app/LuauForge/native/LuauHost.dll
+
+      - name: Publish app (single-file, self-contained win-x64)
+        run: dotnet publish app/LuauForge -c Release -r win-x64 --self-contained true -o dist
+
+      - name: Verify published output
+        shell: pwsh
+        run: |
+          $required = @("LuauForge.exe", "LuauHost.dll")
+          foreach ($f in $required) {
+            if (-not (Test-Path "dist/$f")) { throw "missing publish output: dist/$f" }
+          }
+          Get-ChildItem dist | Select-Object Name, Length
+
+      - name: Upload LuauForge win-x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: LuauForge-win-x64
+          path: |
+            dist/LuauForge.exe
+            dist/LuauHost.dll
+            README.md
+            BUILDING.md
+          if-no-files-found: error
